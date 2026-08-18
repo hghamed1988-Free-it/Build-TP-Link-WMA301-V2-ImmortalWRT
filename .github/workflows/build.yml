@@ -1,16 +1,25 @@
-name: Build TP-Link WMA301 V2 ImmortalWrt - Unified Verified R7
+name: Build TP-Link WMA301 - Source-Driven Verified R8
 
 on:
   workflow_dispatch:
     inputs:
+      device_profile:
+        description: 'Exact WMA301 profile. Choose 2.1 only when the device label explicitly says WMA301 2.1.'
+        required: true
+        default: tplink_wma301
+        type: choice
+        options:
+          - tplink_wma301
+          - tplink_wma301-stock
+          - tplink_wma301_2.1
       include_initramfs:
-        description: 'Build the WMA301 initramfs/recovery kernel in addition to factory + sysupgrade'
+        description: 'Also build the exact-profile initramfs/recovery kernel'
         required: true
         default: true
         type: boolean
 
 concurrency:
-  group: wma301-r7-${{ github.ref }}
+  group: wma301-r8-${{ github.ref }}-${{ inputs.device_profile }}
   cancel-in-progress: false
 
 permissions:
@@ -19,22 +28,27 @@ permissions:
 env:
   SOURCE_REPO: https://github.com/padavanonly/immortalwrt-mt798x-6.6.git
   SOURCE_REF: openwrt-24.10-6.6
-  DEVICE_PROFILE: tplink_wma301
-  DEVICE_DTS: mt7981b-tplink-wma301
+  DEVICE_PROFILE: ${{ inputs.device_profile }}
   TARGET_OUTPUT: bin/targets/mediatek/filogic
   TZ: UTC
 
 jobs:
   build:
-    name: Build and fail-closed verify exact TP-Link WMA301
+    name: Build and source-driven verify ${{ inputs.device_profile }}
     runs-on: ubuntu-22.04
     timeout-minutes: 420
 
     steps:
-      - name: Checkout R7 build project
+      - name: Checkout R8 build project
         uses: actions/checkout@v4
 
-      - name: R7 project self-tests
+      - name: Validate requested exact profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/device_profiles.py --profile "$DEVICE_PROFILE"
+
+      - name: R8 project self-tests
         shell: bash
         run: |
           set -euo pipefail
@@ -63,34 +77,40 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
             bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext \
             gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 \
             libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
             libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev \
-            lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf \
-            python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c \
-            rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip upx-ucl vim wget \
-            xmlto xxd zlib1g-dev zstd
+            lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 \
+            python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons \
+            squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
       - name: Clone controlled ImmortalWrt source branch
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --single-branch --branch "$SOURCE_REF" "$SOURCE_REPO" immortalwrt
+          git clone --depth 1 --filter=blob:none --single-branch --branch "$SOURCE_REF" "$SOURCE_REPO" immortalwrt
           SOURCE_COMMIT="$(git -C immortalwrt rev-parse HEAD)"
           echo "SOURCE_COMMIT=$SOURCE_COMMIT" >> "$GITHUB_ENV"
           echo "Source repo  : $SOURCE_REPO"
           echo "Source ref   : $SOURCE_REF"
           echo "Source commit: $SOURCE_COMMIT"
 
-      - name: Hard gate 1 - verify current upstream WMA301 source contract
+      - name: Hard gate 1 - verify current upstream WMA301 profile inventory and exact source contract
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/verify_source.py --source-dir immortalwrt
+          python3 scripts/verify_source.py --source-dir immortalwrt --profile "$DEVICE_PROFILE"
+          {
+            echo '## R8 exact source identity'
+            echo '```text'
+            python3 scripts/device_profiles.py --profile "$DEVICE_PROFILE"
+            echo "source_commit=$SOURCE_COMMIT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Update and install feeds with retries
         shell: bash
@@ -110,35 +130,43 @@ jobs:
             sleep $((attempt * 10))
           done
 
-      - name: Generate exact single-device WMA301 config from canonical MT7981 defconfig
+      - name: Restore source download cache
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/dl
+          key: wma301-r8-dl-${{ runner.os }}-${{ env.SOURCE_REF }}-${{ hashFiles('immortalwrt/feeds.conf.default') }}
+          restore-keys: |
+            wma301-r8-dl-${{ runner.os }}-${{ env.SOURCE_REF }}-
+
+      - name: Generate exact single-device config from canonical MT7981 meta-defconfig
         shell: bash
         run: |
           set -euo pipefail
-          args=(--source-dir immortalwrt --output immortalwrt/.config)
+          args=(--source-dir immortalwrt --output immortalwrt/.config --profile "$DEVICE_PROFILE")
           if [[ "${{ inputs.include_initramfs }}" == "true" ]]; then
             args+=(--include-initramfs)
           fi
           python3 scripts/prepare_config.py "${args[@]}"
 
-      - name: Resolve config with make defconfig
+      - name: Resolve target with make defconfig
         shell: bash
         working-directory: immortalwrt
         run: |
           set -euo pipefail
           make defconfig
 
-      - name: Hard gate 2 - resolved device must be exactly tplink_wma301
+      - name: Hard gate 2 - resolved target must be mediatek/filogic and exactly the requested profile
         shell: bash
         run: |
           set -euo pipefail
-          args=(--source-dir immortalwrt)
+          args=(--source-dir immortalwrt --profile "$DEVICE_PROFILE")
           if [[ "${{ inputs.include_initramfs }}" == "true" ]]; then
             args+=(--require-initramfs)
           fi
           python3 scripts/validate_config.py "${args[@]}"
           cp immortalwrt/.config effective.config
-          echo '--- exact selected device ---'
-          grep -E '^CONFIG_TARGET_mediatek=y$|^CONFIG_TARGET_mediatek_mt7981=y$|^CONFIG_TARGET_DEVICE_.+_DEVICE_.+=y$|^CONFIG_TARGET_ROOTFS_INITRAMFS=y$' effective.config
+          echo '--- resolved exact identity ---'
+          grep -E '^CONFIG_TARGET_mediatek=y$|^CONFIG_TARGET_mediatek_filogic=y$|^CONFIG_TARGET_DEVICE_.+_DEVICE_.+=y$|^CONFIG_TARGET_ROOTFS_INITRAMFS=y$' effective.config
 
       - name: Download sources with integrity retries
         shell: bash
@@ -162,7 +190,7 @@ jobs:
           done
           [[ "$success" == 1 ]] || { echo 'ERROR: source download failed integrity gate after 3 attempts.' >&2; exit 30; }
 
-      - name: Compile exact WMA301 firmware
+      - name: Compile exact selected WMA301 profile
         shell: bash
         working-directory: immortalwrt
         run: |
@@ -173,24 +201,25 @@ jobs:
             make -j1 V=s
           fi
 
-      - name: Hard gate 3 - revalidate source and resolved device after build
+      - name: Hard gate 3 - revalidate source and exact resolved profile after build
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/verify_source.py --source-dir immortalwrt
-          args=(--source-dir immortalwrt)
+          python3 scripts/verify_source.py --source-dir immortalwrt --profile "$DEVICE_PROFILE"
+          args=(--source-dir immortalwrt --profile "$DEVICE_PROFILE")
           if [[ "${{ inputs.include_initramfs }}" == "true" ]]; then
             args+=(--require-initramfs)
           fi
           python3 scripts/validate_config.py "${args[@]}"
 
-      - name: Hard gate 4 - collect only verified exact WMA301 images
+      - name: Hard gate 4 - collect only exact upstream-checksummed selected-profile images
         shell: bash
         run: |
           set -euo pipefail
           args=(
             --source-dir immortalwrt
             --output-dir firmware
+            --profile "$DEVICE_PROFILE"
             --source-repo "$SOURCE_REPO"
             --source-ref "$SOURCE_REF"
             --source-commit "$SOURCE_COMMIT"
@@ -203,20 +232,27 @@ jobs:
           echo "workflow_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> firmware/BUILD-IDENTITY.txt
           ls -lah firmware
 
-      - name: Hard gate 5 - final artifact identity and SHA-256 validation
+      - name: Hard gate 5 - final manifest identity and SHA-256 validation
         shell: bash
         run: |
           set -euo pipefail
-          args=(--artifact-dir firmware)
+          args=(--artifact-dir firmware --profile "$DEVICE_PROFILE")
           if [[ "${{ inputs.include_initramfs }}" == "true" ]]; then
             args+=(--require-initramfs)
           fi
           python3 scripts/final_gate.py "${args[@]}"
+          {
+            echo '## R8 verification result'
+            echo '**PASSED: source-driven exact profile + target + SHA-256 gates**'
+            echo '```text'
+            cat firmware/BUILD-IDENTITY.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload verified WMA301 artifact only
+      - name: Upload verified exact WMA301 artifact only
         uses: actions/upload-artifact@v4
         with:
-          name: TP-Link-WMA301-Verified-R7-${{ github.run_number }}
+          name: TP-Link-WMA301-R8-${{ inputs.device_profile }}-${{ github.run_number }}
           path: firmware/
           if-no-files-found: error
           retention-days: 30
