@@ -1,0 +1,5 @@
+YAML parse: PASS
+Embedded Python verifier compile: PASS
+All workflow Bash run blocks syntax: PASS
+Single-profile device symbol + target/subtarget generation: PASS
+Wrong/multi-profile namespace rejection: PASS
