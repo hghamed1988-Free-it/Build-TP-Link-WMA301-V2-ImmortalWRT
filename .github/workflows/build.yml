@@ -1,4 +1,4 @@
-name: Build TP-Link WMA301 - Self-Contained Verified R9
+name: Build TP-Link WMA301 - Self-Contained Verified R9.1
 
 on:
   workflow_dispatch:
@@ -56,11 +56,12 @@ jobs:
           from dataclasses import dataclass
           from pathlib import Path
 
-          VERSION = "R9"
+          VERSION = "R9.1"
           TARGET_REL = Path("bin/targets/mediatek/filogic")
-          SELECTED_RE = re.compile(r"^CONFIG_TARGET_DEVICE_.+_DEVICE_.+=y$")
+          SELECTED_RE = re.compile(r"^CONFIG_TARGET_mediatek_filogic_DEVICE_.+=y$")
           DEVICE_LINE = re.compile(r"^CONFIG_TARGET_DEVICE_.+_DEVICE_.+=")
           DEVICE_PACKAGE_LINE = re.compile(r"^CONFIG_TARGET_DEVICE_PACKAGES_.+=")
+          SINGLE_DEVICE_LINE = re.compile(r"^CONFIG_TARGET_mediatek_filogic_DEVICE_.+=")
 
           @dataclass(frozen=True)
           class Profile:
@@ -76,7 +77,7 @@ jobs:
 
               @property
               def device_symbol(self) -> str:
-                  return f"CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_{self.profile}=y"
+                  return f"CONFIG_TARGET_mediatek_filogic_DEVICE_{self.profile}=y"
 
               @property
               def package_symbol(self) -> str:
@@ -192,9 +193,12 @@ jobs:
               raw = base_cfg.read_text(encoding="utf-8", errors="replace").splitlines()
               out: list[str] = []
               for line in raw:
-                  if DEVICE_LINE.match(line) or DEVICE_PACKAGE_LINE.match(line):
+                  if DEVICE_LINE.match(line) or DEVICE_PACKAGE_LINE.match(line) or SINGLE_DEVICE_LINE.match(line):
                       continue
                   if line in {
+                      "CONFIG_TARGET_mediatek=y",
+                      "CONFIG_TARGET_mediatek_mt7981=y",
+                      "CONFIG_TARGET_mediatek_filogic=y",
                       "CONFIG_TARGET_MULTI_PROFILE=y",
                       "# CONFIG_TARGET_MULTI_PROFILE is not set",
                       "CONFIG_TARGET_ALL_PROFILES=y",
@@ -208,11 +212,12 @@ jobs:
                   out.append(line)
 
               out += [
+                  "CONFIG_TARGET_mediatek=y",
+                  "CONFIG_TARGET_mediatek_filogic=y",
                   "# CONFIG_TARGET_MULTI_PROFILE is not set",
                   "# CONFIG_TARGET_ALL_PROFILES is not set",
                   "CONFIG_TARGET_PER_DEVICE_ROOTFS=y",
                   spec.device_symbol,
-                  spec.package_symbol,
                   "CONFIG_TARGET_ROOTFS_INITRAMFS=y" if initramfs else "# CONFIG_TARGET_ROOTFS_INITRAMFS is not set",
               ]
               selected = [x for x in out if SELECTED_RE.match(x)]
@@ -222,6 +227,8 @@ jobs:
                   die("ASR3000 survived config generation")
               if any("CONFIG_TARGET_DEVICE_mediatek_mt7981_DEVICE_" in x for x in out):
                   die("obsolete mediatek_mt7981 per-device namespace survived config generation")
+              if any(x.startswith("CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_") and x.endswith("=y") for x in out):
+                  die("multi-profile device namespace survived single-profile generation")
 
               out_path.parent.mkdir(parents=True, exist_ok=True)
               out_path.write_text("\n".join(out) + "\n", encoding="utf-8")
@@ -246,6 +253,8 @@ jobs:
                   die("ABT ASR3000 is selected")
               if any(x.startswith("CONFIG_TARGET_DEVICE_mediatek_mt7981_DEVICE_") and x.endswith("=y") for x in lines):
                   die("obsolete mediatek_mt7981 per-device namespace is selected")
+              if any(x.startswith("CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_") and x.endswith("=y") for x in lines):
+                  die("multi-profile device namespace is selected")
 
           def read_sums(path: Path) -> dict[str, str]:
               out: dict[str, str] = {}
@@ -603,7 +612,7 @@ jobs:
           if [[ "${{ inputs.include_initramfs }}" == "true" ]]; then args+=(--initramfs); fi
           python3 "$GUARD" "${args[@]}"
           cp immortalwrt/.config effective.config
-          grep -E '^CONFIG_TARGET_mediatek=y$|^CONFIG_TARGET_mediatek_filogic=y$|^CONFIG_TARGET_DEVICE_.+_DEVICE_.+=y$|^CONFIG_TARGET_ROOTFS_INITRAMFS=y$' effective.config
+          grep -E '^CONFIG_TARGET_mediatek=y$|^CONFIG_TARGET_mediatek_filogic=y$|^CONFIG_TARGET_mediatek_filogic_DEVICE_.+=y$|^CONFIG_TARGET_ROOTFS_INITRAMFS=y$' effective.config
 
       - name: Download sources with integrity retries
         shell: bash
@@ -663,7 +672,7 @@ jobs:
           if [[ "${{ inputs.include_initramfs }}" == "true" ]]; then args+=(--initramfs); fi
           python3 "$GUARD" "${args[@]}"
           {
-            echo '## R9 verification result'
+            echo '## R9.1 verification result'
             echo '**PASSED: self-contained exact profile + source + SHA-256 gates**'
             echo '```text'
             cat firmware/BUILD-IDENTITY.txt
@@ -673,7 +682,7 @@ jobs:
       - name: Upload verified WMA301 artifact only
         uses: actions/upload-artifact@v4
         with:
-          name: TP-Link-WMA301-R9-${{ inputs.device_profile }}-${{ github.run_number }}
+          name: TP-Link-WMA301-R9.1-${{ inputs.device_profile }}-${{ github.run_number }}
           path: firmware/
           if-no-files-found: error
           retention-days: 30
